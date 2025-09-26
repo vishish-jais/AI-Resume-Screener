@@ -61,6 +61,27 @@ $env:TESSERACT_CMD = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 $env:POPPLER_PATH = "C:\\poppler\\Library\\bin"
 ```
 
+## Embed the widget on another site (token access)
+
+Set a widget token so other sites can call the API without logging in:
+
+```powershell
+$env:WIDGET_TOKEN = "a9w_obkbR3AwFL-Z_OitA4RXceQPBRn-HcwDTOtUQD3DNgU"
+```
+
+Then include this on the external site (replace API base with your deployed URL in production):
+
+```html
+<script
+  src="http://localhost:5000/static/js/ats-embed.js"
+  data-api-base="http://localhost:5000"
+  data-token="a9w_obkbR3AwFL-Z_OitA4RXceQPBRn-HcwDTOtUQD3DNgU"
+  defer
+></script>
+```
+
+The loader injects `static/css/styles.css` and `static/js/widget.js` automatically and configures the widget to call `/api/summarize` and `/api/summarize_batch` using the provided token.
+
 ## Notes
 
 - This is a dev setup. For production, change `SECRET_KEY`, run behind HTTPS, and secure file handling.

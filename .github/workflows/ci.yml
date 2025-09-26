@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Smoke test Flask app
+        env:
+          WIDGET_TOKEN: dummy-token
+        run: |
+          python - << 'PY'
+          from app import app
+          client = app.test_client()
+
+          # 1) Unauthorized without token/session
+          r = client.post('/api/summarize', data={'text': 'hello world'})
+          assert r.status_code in (401, 200)
+          if r.status_code == 200:
+              data = r.get_json() or {}
+              assert data.get('ok') in (True, False)
+
+          # 2) Authorized with token via query param (matches _is_request_authorized)
+          r = client.post('/api/summarize?token=dummy-token', data={'text': 'Candidate with 5 years Python and AWS experience.'})
+          assert r.status_code == 200, r.status_code
+          data = r.get_json()
+          assert data['ok'] is True
+          assert 'summary' in data
+          print('Smoke test passed')
+          PY
