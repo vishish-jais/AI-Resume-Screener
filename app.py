@@ -11,6 +11,8 @@ from summarizer import (
     summarize_text,
     summarize_pointwise_structured,
     summarize_crisp,
+    compute_ats_score,
+    compute_ats_keywords,
 )
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -59,6 +61,7 @@ class Job(db.Model):
     title = db.Column(db.String(200), nullable=False)
     company = db.Column(db.String(200), nullable=False)
     tags = db.Column(db.String(200), default='')
+    description = db.Column(db.Text, default='')  # JD text
 
 
 class Application(db.Model):
@@ -68,6 +71,7 @@ class Application(db.Model):
     status = db.Column(db.String(50), default='New')
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     resume_filename = db.Column(db.String(255))
+    ats_score = db.Column(db.Integer, default=None)  # cached ATS score vs job description
 
     candidate = db.relationship('Candidate', backref=db.backref('applications', lazy=True))
     job = db.relationship('Job', backref=db.backref('applications', lazy=True))
@@ -306,6 +310,17 @@ def apply(job_id: int):
         app_row = Application(candidate_id=user.id, job_id=job.id, status='New', resume_filename=filename)
         db.session.add(app_row)
         db.session.commit()
+
+        # After commit we have IDs; compute ATS score if possible
+        try:
+            if filename and (job.description or '').strip():
+                resume_text = extract_text_from_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                # Use keyword-only scoring for submissions
+                ats = compute_ats_keywords(resume_text, job.description)
+                app_row.ats_score = ats.get('score', 0)
+                db.session.commit()
+        except Exception:
+            pass
         # flash('Application submitted successfully.', 'success')
         return redirect(url_for('index'))
 
@@ -414,16 +429,94 @@ def api_summarize_batch():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/ats_score', methods=['POST'])
+def api_ats_score():
+    if not _is_request_authorized():
+        return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+    try:
+        jd_text = request.form.get('job_description', '')
+        job_id = request.form.get('job_id')
+        resume_file = request.files.get('resume')
+        application_id = request.form.get('application_id')
+        # Default to keyword-only unless explicitly requested otherwise
+        mode = (request.form.get('mode') or 'keywords').lower().strip()
+
+        # Resolve JD text
+        if not jd_text and job_id:
+            job = Job.query.get(int(job_id)) if job_id else None
+            jd_text = (job.description or '') if job else ''
+
+        if application_id and not resume_file:
+            app_row = Application.query.get(int(application_id))
+            if not app_row or not app_row.resume_filename:
+                return jsonify({'ok': False, 'error': 'Application/resume not found'}), 400
+            resume_path = os.path.join(app.config['UPLOAD_FOLDER'], app_row.resume_filename)
+            resume_text = extract_text_from_file(resume_path)
+        else:
+            if not resume_file:
+                return jsonify({'ok': False, 'error': 'Provide resume file or application_id'}), 400
+            filename = secure_filename(resume_file.filename)
+            if not filename:
+                return jsonify({'ok': False, 'error': 'Invalid file name'}), 400
+            save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            resume_file.save(save_path)
+            resume_text = extract_text_from_file(save_path)
+
+        if not jd_text.strip() or not resume_text.strip():
+            return jsonify({'ok': False, 'error': 'Empty JD or resume text'}), 400
+
+        # Try to get job title for better title alignment
+        job_title = None
+        try:
+            if job_id:
+                j = Job.query.get(int(job_id))
+                job_title = j.title if j else None
+        except Exception:
+            job_title = None
+
+        if mode == 'keywords':
+            ats = compute_ats_keywords(resume_text, jd_text)
+        else:
+            ats = compute_ats_score(resume_text, jd_text, job_title=job_title)
+        rs_txt, rs_html = summarize_pointwise_structured(resume_text)
+        jd_txt, jd_html = summarize_pointwise_structured(jd_text)
+        return jsonify({'ok': True, 'ats': ats, 'resume_summary': rs_txt, 'resume_summary_html': rs_html, 'jd_summary': jd_txt, 'jd_summary_html': jd_html})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        # Lightweight migrations for new columns
+        from sqlalchemy import text as _sql_text
+        try:
+            # Add Job.description if missing
+            cols = db.session.execute(_sql_text("PRAGMA table_info(job)")).fetchall()
+            names = [c[1] for c in cols]
+            if 'description' not in names:
+                db.session.execute(_sql_text('ALTER TABLE job ADD COLUMN description TEXT DEFAULT ""'))
+                db.session.commit()
+        except Exception:
+            pass
+        try:
+            # Add Application.ats_score if missing
+            cols = db.session.execute(_sql_text("PRAGMA table_info(application)")).fetchall()
+            names = [c[1] for c in cols]
+            if 'ats_score' not in names:
+                db.session.execute(_sql_text('ALTER TABLE application ADD COLUMN ats_score INTEGER'))
+                db.session.commit()
+        except Exception:
+            pass
         # Auto-seed minimal data on first run for convenience
         if HR.query.count() == 0:
             hr = HR(username='hr')
             hr.set_password('hr123')
             db.session.add(hr)
         if Job.query.count() == 0:
-            job = Job(title='Senior Frontend Developer', company='Company XYZ', tags='React,TypeScript')
+            job = Job(title='Senior Frontend Developer', company='Company XYZ', tags='React,TypeScript', description='We are seeking a Senior Frontend Developer with strong React and TypeScript skills. 5+ years experience preferred. Experience with CI/CD and cloud is a plus.')
             db.session.add(job)
         db.session.commit()
-    app.run(debug=True)
+    # Allow configurable host/port
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)

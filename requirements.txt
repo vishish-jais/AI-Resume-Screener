@@ -14,5 +14,12 @@ pytesseract==0.3.13
 pdf2image==1.16.3
 pypdfium2==4.30.0
 
+# Optional semantic similarity (improves ATS quality)
+sentence-transformers==2.2.2
+torch>=2.0.0,<3.0.0
+
+# Fuzzy matching for skills and phrases
+rapidfuzz==3.9.6
+
 # CORS (optional, not used directly but useful if you later separate frontend/backend)
 Flask-Cors==5.0.0

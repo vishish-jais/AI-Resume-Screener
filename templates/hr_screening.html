@@ -11,6 +11,19 @@
       <div class="card-body">
         <form id="screeningForm" method="POST" enctype="multipart/form-data">
           <div class="mb-3">
+            <label class="form-label">Scoring Mode</label>
+            <div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="modeSelect" id="modeKeywords" value="keywords" checked>
+                <label class="form-check-label" for="modeKeywords">Keywords Only</label>
+              </div>
+              <div class="form-check form-check-inline">
+                <input class="form-check-input" type="radio" name="modeSelect" id="modeAdvanced" value="advanced">
+                <label class="form-check-label" for="modeAdvanced">Advanced</label>
+              </div>
+            </div>
+          </div>
+          <div class="mb-3">
             <label for="jobDescription" class="form-label">Job Description</label>
             <textarea class="form-control" id="jobDescription" name="job_description" rows="8" placeholder="Paste the job description here..." required></textarea>
           </div>
@@ -51,6 +64,7 @@
             <th>Candidate</th>
             <th>Job</th>
             <th>Status</th>
+            <th>ATS Score</th>
             <th>Resume</th>
             <th>Date</th>
           </tr>
@@ -61,11 +75,18 @@
             <td>{{ a.candidate.name or a.candidate.username }}</td>
             <td>{{ a.job.title }}</td>
             <td><span class="badge bg-secondary">{{ a.status }}</span></td>
+            <td>
+              {% if a.ats_score is not none %}
+                <span class="badge bg-{% if a.ats_score >= 75 %}success{% elif a.ats_score >= 50 %}warning{% else %}secondary{% endif %}">{{ a.ats_score }}%</span>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
             <td>{% if a.resume_filename %}<a href="{{ url_for('download_resume', filename=a.resume_filename) }}" class="btn btn-sm btn-outline-primary">Download</a>{% else %}<span class="text-muted">N/A</span>{% endif %}</td>
             <td>{{ a.created_at.strftime('%Y-%m-%d') }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="5" class="text-center text-muted py-3">No applications found</td></tr>
+          <tr><td colspan="6" class="text-center text-muted py-3">No applications found</td></tr>
           {% endfor %}
         </tbody>
       </table>
@@ -74,11 +95,78 @@
 </div>
 
 <script>
-document.getElementById('screeningForm').addEventListener('submit', function(e) {
+document.getElementById('screeningForm').addEventListener('submit', async function(e) {
   e.preventDefault();
   const resultsDiv = document.getElementById('screeningResults');
-  resultsDiv.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div><p class="mt-2">Analyzing resume...</p></div>`;
-  setTimeout(() => { resultsDiv.innerHTML = `<div class="alert alert-info">This is a demo placeholder. Use the bottom-right chatbot to summarize resumes.</div>`; }, 1500);
+  resultsDiv.innerHTML = `<div class="text-center py-4"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div><p class="mt-2">Analyzing resume and computing ATS score...</p></div>`;
+
+  try {
+    const fd = new FormData();
+    fd.append('job_description', document.getElementById('jobDescription').value);
+    const fileInput = document.getElementById('resumeFile');
+    if (fileInput.files.length > 0) {
+      fd.append('resume', fileInput.files[0]);
+    }
+    // scoring mode
+    const modeEl = document.querySelector('input[name="modeSelect"]:checked');
+    if (modeEl) {
+      fd.append('mode', modeEl.value);
+    }
+
+    const res = await fetch("{{ url_for('api_ats_score') }}", {
+      method: 'POST',
+      body: fd
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      resultsDiv.innerHTML = `<div class="alert alert-danger">${(data.error || 'Failed to compute ATS score')}</div>`;
+      return;
+    }
+
+    const s = data.ats || { score: 0, cosine: 0, keyword: 0, years_alignment: 0, bm25: 0, embed: 0, title_match: 0, must_match: 0, nice_match: 0, section_alignment: 0, matched_skills: [], missing_must_skills: [], missing_nice_skills: [], capped: false };
+    const color = s.score >= 75 ? 'success' : (s.score >= 50 ? 'warning' : 'secondary');
+    resultsDiv.innerHTML = `
+      <div class="mb-3">
+        <h5 class="mb-2">ATS Match Score: <span class="badge bg-${color}">${s.score}%</span></h5>
+        <div class="text-muted small">
+          Components: BM25 ${s.bm25}, embed ${s.embed}, must ${s.must_match}, nice ${s.nice_match}, years ${s.years_alignment}, section ${s.section_alignment}, title ${s.title_match}, cosine ${s.cosine}, keywords ${s.keyword}
+        </div>
+        ${s.capped ? '<div class="small text-danger mt-1">Score capped due to missing must-have skills.</div>' : ''}
+      </div>
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="border rounded p-2">
+            <div class="fw-semibold mb-2">Resume Summary</div>
+            ${data.resume_summary_html || `<pre class="mb-0 small">${(data.resume_summary || '').replace(/</g,'&lt;')}</pre>`}
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="border rounded p-2">
+            <div class="fw-semibold mb-2">Job Description Summary</div>
+            ${data.jd_summary_html || `<pre class="mb-0 small">${(data.jd_summary || '').replace(/</g,'&lt;')}</pre>`}
+          </div>
+        </div>
+      </div>
+      <div class="row g-3 mt-2">
+        <div class="col-md-6">
+          <div class="border rounded p-2">
+            <div class="fw-semibold mb-2">Matched Skills</div>
+            ${(s.matched_skills && s.matched_skills.length) ? `<span class="badge text-bg-success me-1">${s.matched_skills.join('</span> <span class=\"badge text-bg-success me-1\">')}</span>` : '<span class="text-muted">None detected</span>'}
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="border rounded p-2">
+            <div class="fw-semibold mb-2">Missing (Must-have)</div>
+            ${(s.missing_must_skills && s.missing_must_skills.length) ? `<span class="badge text-bg-danger me-1">${s.missing_must_skills.join('</span> <span class=\"badge text-bg-danger me-1\">')}</span>` : '<span class="text-muted">None</span>'}
+            <div class="fw-semibold mt-2 mb-2">Missing (Nice-to-have)</div>
+            ${(s.missing_nice_skills && s.missing_nice_skills.length) ? `<span class="badge text-bg-warning me-1">${s.missing_nice_skills.join('</span> <span class=\"badge text-bg-warning me-1\">')}</span>` : '<span class="text-muted">None</span>'}
+          </div>
+        </div>
+      </div>
+    `;
+  } catch (err) {
+    resultsDiv.innerHTML = `<div class="alert alert-danger">${(err?.message || 'Unexpected error')}</div>`;
+  }
 });
 </script>
 {% endblock %}
